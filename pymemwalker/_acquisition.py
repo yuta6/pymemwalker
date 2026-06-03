@@ -34,6 +34,28 @@ class PhysicalMemoryAcquisition(Protocol):
         a live backend (DMA hardware, kernel driver, VM debug API).
       - ``write_pa`` **must never raise**, mirroring ``read_pa``.
       - ``max_pa`` returns a positive ``int`` upper bound for scan loops.
+
+    Lifecycle is deliberately **not** part of this Protocol. ``Walker``
+    only ever calls ``read_pa`` / ``write_pa`` / ``max_pa`` — it borrows
+    the acquisition to read bytes and never owns it. Therefore:
+
+      - Open / prepare your source in your own ``__init__`` so reads work
+        the moment the object is handed to ``Walker``. That is an implied
+        precondition of ``read_pa`` (it must return real bytes), not a
+        method the library calls.
+      - If your backend holds an OS resource (open file, loaded driver,
+        mapped device), implement ``close()`` to release it — and,
+        optionally, ``__enter__`` / ``__exit__`` so callers can use
+        ``with``. The *caller* owns this lifecycle; there is no
+        ``Walker.close()``. (memprocfs' ``Vmm`` carries ``close()`` because
+        it is a concrete class, not because any base contract forces it.)
+
+    Typical caller code::
+
+        acq = LiveAcquisition()   # __init__ loads the driver
+        walker = Walker(acq)        # borrows acq, only reads via read_pa
+        ...
+        acq.close()                 # caller releases — NOT walker.close()
     """
 
     def read_pa(self, pa: int, size: int) -> bytes:
