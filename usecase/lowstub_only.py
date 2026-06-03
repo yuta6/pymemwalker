@@ -1,7 +1,7 @@
 """Diagnostic: run only ``find_kernel_cr3`` (Low Stub parsing).
 
 Useful for verifying that a new acquisition backend can correctly serve
-low physical memory before exercising the full ``Vmm`` pipeline.
+low physical memory before exercising the full ``Walker`` pipeline.
 
 Usage:
     python -m usecase.lowstub_only <dump.raw>
@@ -15,7 +15,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from pymemwalker.kernel import find_kernel_cr3  # noqa: E402
+from pymemwalker._kernel import find_kernel_cr3  # noqa: E402
 from usecase.usage import RawDumpAcquisition  # noqa: E402
 
 

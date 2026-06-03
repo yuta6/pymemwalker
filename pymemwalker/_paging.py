@@ -19,7 +19,7 @@ Virtual address breakdown (48-bit canonical):
 import struct
 from typing import Optional
 
-from .acquisition import PhysicalMemoryAcquisition
+from ._acquisition import PhysicalMemoryAcquisition
 
 
 # Mask for the physical page frame address inside a PTE (bits 12-51).

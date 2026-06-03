@@ -43,7 +43,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from pymemwalker import Vmm  # noqa: E402
+from pymemwalker import Walker  # noqa: E402
 
 
 class YourAcquisition:
@@ -84,12 +84,12 @@ class YourAcquisition:
 def main() -> int:
     acq = YourAcquisition()
 
-    print(f"[*] Initializing Vmm against {type(acq).__name__} ...")
-    vmm = Vmm(acq)
-    print(f"    kernel CR3 = 0x{vmm.kernel_cr3:X}")
+    print(f"[*] Initializing Walker against {type(acq).__name__} ...")
+    walker = Walker(acq)
+    print(f"    kernel CR3 = 0x{walker.kernel_cr3:X}")
     print()
 
-    procs = vmm.list_processes()
+    procs = walker.list_processes()
     print(f"[*] {len(procs)} processes:")
     for p in procs:
         print(f"    PID={p.pid:5}  {p.name:<24s}  "

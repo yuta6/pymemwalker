@@ -2,9 +2,9 @@
 
 Users implement this Protocol with their own backend (raw dump file,
 DMA hardware, VMware .vmem, hibernation file, etc.) and pass an instance
-to ``Vmm()``. No backend is implemented inside the library itself; a
+to ``Walker()``. No backend is implemented inside the library itself; a
 reference implementation backed by a raw dump file is provided in
-``examples/usage.py``.
+``usecase/usage.py``.
 
 The ``@runtime_checkable`` decorator enables ``isinstance(acq, ...)``
 checks at construction time so that obvious structural mistakes (missing

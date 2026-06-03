@@ -10,12 +10,15 @@ Design constraints:
   - One-time scan at construction (a few seconds); cached afterwards.
 
 Public API:
-  Vmm                          — top-level class users instantiate.
+  Walker                       — top-level class users instantiate.
   PhysicalMemoryAcquisition    — Protocol users implement for their backend.
-  ProcessInfo                  — return type of Vmm.list_processes().
-"""
-from .vmm import Vmm
-from .acquisition import PhysicalMemoryAcquisition
-from .eprocess import ProcessInfo
+  ProcessInfo                  — return type of Walker.list_processes().
 
-__all__ = ["Vmm", "PhysicalMemoryAcquisition", "ProcessInfo"]
+Internal modules (``_acquisition``, ``_paging``, ``_kernel``, ``_eprocess``)
+are implementation details and not part of the public API.
+"""
+from .walker import Walker
+from ._acquisition import PhysicalMemoryAcquisition
+from ._eprocess import ProcessInfo
+
+__all__ = ["Walker", "PhysicalMemoryAcquisition", "ProcessInfo"]

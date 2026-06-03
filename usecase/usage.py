@@ -22,7 +22,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from pymemwalker import Vmm  # noqa: E402
+from pymemwalker import Walker  # noqa: E402
 
 
 class RawDumpAcquisition:
@@ -64,8 +64,8 @@ class RawDumpAcquisition:
 # Subcommands
 # ---------------------------------------------------------------------- #
 
-def cmd_ps(vmm: Vmm) -> int:
-    procs = vmm.list_processes()
+def cmd_ps(walker: Walker) -> int:
+    procs = walker.list_processes()
     print(f"{len(procs)} processes:")
     for p in procs:
         print(f"  PID={p.pid:5}  {p.name:<24s}  "
@@ -73,9 +73,9 @@ def cmd_ps(vmm: Vmm) -> int:
     return 0
 
 
-def cmd_find(vmm: Vmm, name: str) -> int:
-    cr3 = vmm.cr3_by_name(name)
-    base = vmm.base_by_name(name)
+def cmd_find(walker: Walker, name: str) -> int:
+    cr3 = walker.cr3_by_name(name)
+    base = walker.base_by_name(name)
     if cr3 is None:
         print(f"{name}: not found")
         return 1
@@ -88,14 +88,14 @@ def cmd_find(vmm: Vmm, name: str) -> int:
     return 0
 
 
-def cmd_hexdump(vmm: Vmm, name: str, va_str: str, size_str: str = "64") -> int:
-    cr3 = vmm.cr3_by_name(name)
+def cmd_hexdump(walker: Walker, name: str, va_str: str, size_str: str = "64") -> int:
+    cr3 = walker.cr3_by_name(name)
     if cr3 is None:
         print(f"{name}: not found")
         return 1
     va = int(va_str, 0)
     size = int(size_str, 0)
-    data = vmm.read_va(cr3, va, size)
+    data = walker.read_va(cr3, va, size)
     print(f"{name} VA=0x{va:X} ({len(data)} bytes):")
     for i in range(0, len(data), 16):
         chunk = data[i:i + 16]
@@ -105,10 +105,10 @@ def cmd_hexdump(vmm: Vmm, name: str, va_str: str, size_str: str = "64") -> int:
     return 0
 
 
-def cmd_offsets(vmm: Vmm) -> int:
-    print(f"kernel CR3 = 0x{vmm.kernel_cr3:X}")
+def cmd_offsets(walker: Walker) -> int:
+    print(f"kernel CR3 = 0x{walker.kernel_cr3:X}")
     print("EPROCESS field offsets (auto-discovered, no PDB):")
-    for k, v in vmm.offsets.items():
+    for k, v in walker.offsets.items():
         print(f"  {k:<22s} = {f'0x{v:X}' if isinstance(v, int) else v}")
     return 0
 
@@ -142,13 +142,13 @@ def main() -> int:
     with RawDumpAcquisition(str(dump_path)) as acq:
         print(f"[*] {dump_path} ({acq.max_pa / (1024 ** 3):.1f} GiB)\n")
 
-        print("[*] Initializing Vmm ...")
+        print("[*] Initializing Walker ...")
         t0 = time.perf_counter()
-        vmm = Vmm(acq)
+        walker = Walker(acq)
         print(f"    done in {time.perf_counter() - t0:.2f}s\n")
 
         try:
-            return cmd(vmm, *cmd_args)
+            return cmd(walker, *cmd_args)
         except TypeError as e:
             print(f"wrong arguments for '{cmd_name}': {e}")
             print(__doc__)

@@ -1,4 +1,4 @@
-"""Top-level Vmm class: user-facing entry point for pymemwalker.
+"""Top-level Walker class: user-facing entry point for pymemwalker.
 
 Wires together the acquisition backend, the page-table walker, the kernel
 CR3 discovery, and the EPROCESS chain walker. All the expensive scans run
@@ -6,17 +6,17 @@ once in ``__init__``; subsequent calls hit caches.
 """
 from typing import Optional
 
-from .acquisition import PhysicalMemoryAcquisition
-from .paging import Paging
-from .kernel import find_kernel_cr3, discover_offsets
-from .eprocess import (
+from ._acquisition import PhysicalMemoryAcquisition
+from ._paging import Paging
+from ._kernel import find_kernel_cr3, discover_offsets
+from ._eprocess import (
     ProcessInfo,
     list_processes,
     discover_section_base,
 )
 
 
-class Vmm:
+class Walker:
     """Memory-image analysis context.
 
     Construction performs a few seconds of physical-memory scanning to

@@ -1,8 +1,8 @@
 """EPROCESS chain walking and SectionBaseAddress offset discovery.
 
-Once ``kernel.discover_offsets`` has located the four core EPROCESS field
-offsets (DTB / Name / PID / ActiveProcessLinks), this module walks the
-circular ``ActiveProcessLinks`` list to enumerate all processes, and
+Once ``_kernel.discover_offsets`` has located the four core EPROCESS
+field offsets (DTB / Name / PID / ActiveProcessLinks), this module walks
+the circular ``ActiveProcessLinks`` list to enumerate all processes, and
 infers the ``SectionBaseAddress`` offset from a user-mode process's
 contents.
 """
@@ -10,7 +10,7 @@ import struct
 from dataclasses import dataclass
 from typing import Optional
 
-from .paging import Paging
+from ._paging import Paging
 
 
 # Canonical kernel-space virtual address minimum on x64.
@@ -21,7 +21,7 @@ USER_VA_MAX = 0x0000_7FFF_FFFF_FFFF
 
 @dataclass
 class ProcessInfo:
-    """Basic info about one process. Returned by ``Vmm.list_processes``."""
+    """Basic info about one process. Returned by ``Walker.list_processes``."""
     pid: int
     name: str
     cr3: int          # DirectoryTableBase: root of this process's page tables.

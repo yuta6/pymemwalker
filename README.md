@@ -77,7 +77,7 @@ Memory acquisition itself is **not implemented** — it is provided as a
 
 ```python
 import mmap
-from pymemwalker import Vmm, PhysicalMemoryAcquisition
+from pymemwalker import Walker, PhysicalMemoryAcquisition
 
 
 class RawDumpAcquisition:
@@ -98,13 +98,13 @@ class RawDumpAcquisition:
 
 
 acq = RawDumpAcquisition("memory.raw")
-vmm = Vmm(acq)                            # initial scan takes a few seconds
+walker = Walker(acq)                       # initial scan takes a few seconds
 
-for p in vmm.list_processes():
+for p in walker.list_processes():
     print(f"{p.pid:5}  {p.name:<20}  CR3=0x{p.cr3:X}  Base=0x{p.base:X}")
 
-cr3 = vmm.cr3_by_name("notepad.exe")
-data = vmm.read_va(cr3, 0x7FF600000000, 64)
+cr3 = walker.cr3_by_name("notepad.exe")
+data = walker.read_va(cr3, 0x7FF600000000, 64)
 ```
 
 ## Installation

@@ -1,8 +1,8 @@
 """Kernel CR3 discovery and System EPROCESS resolution.
 
-These run once at ``Vmm.__init__`` time. All discovery is done by reading
-physical memory and parsing kernel-image PE headers in situ — no symbol
-server, no PDB downloads.
+These run once at ``Walker.__init__`` time. All discovery is done by
+reading physical memory and parsing kernel-image PE headers in situ —
+no symbol server, no PDB downloads.
 
 Two-step process (mirrors MemProcFS's canonical pipeline):
 
@@ -23,7 +23,7 @@ import struct
 import time
 from typing import Optional, Tuple
 
-from .acquisition import PhysicalMemoryAcquisition
+from ._acquisition import PhysicalMemoryAcquisition
 
 
 # Offset of DirectoryTableBase inside _EPROCESS. This is _KPROCESS.DirectoryTableBase,
