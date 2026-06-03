@@ -1,0 +1,40 @@
+# Memory dump artifacts — never commit (large, may contain sensitive data)
+*.raw
+*.dmp
+*.mem
+*.vmem
+*.bin
+*.core
+
+# Test fixtures: keep the directory shape, ignore contents
+tests/fixtures/*
+!tests/fixtures/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Build artifacts
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# uv
+uv.lock
