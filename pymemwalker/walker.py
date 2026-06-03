@@ -12,6 +12,7 @@ from ._kernel import find_kernel_cr3, discover_offsets
 from ._eprocess import (
     ProcessInfo,
     list_processes,
+    discover_peb_offset,
     discover_section_base,
 )
 
@@ -74,15 +75,28 @@ class Walker:
 
         procs = list_processes(self._paging, self._kernel_cr3, self._offsets)
 
-        # Infer SectionBaseAddress offset now that we have a chain to inspect,
-        # then re-walk to populate ``base`` for every entry.
-        if 'SectionBaseAddress' not in self._offsets and procs:
-            base_off = discover_section_base(
+        # Infer the field used to recover each process's image base.
+        # Modern Windows: PEB.ImageBaseAddress (Peb offset in EPROCESS).
+        # Older builds:   SectionBaseAddress field directly in EPROCESS.
+        # Whichever resolves first wins; re-walk to populate ``base``.
+        discovered = False
+        if 'Peb' not in self._offsets and 'SectionBaseAddress' not in self._offsets and procs:
+            peb_off = discover_peb_offset(
                 self._paging, self._kernel_cr3, self._offsets, procs
             )
-            if base_off is not None:
-                self._offsets['SectionBaseAddress'] = base_off
-                procs = list_processes(self._paging, self._kernel_cr3, self._offsets)
+            if peb_off is not None:
+                self._offsets['Peb'] = peb_off
+                discovered = True
+                print(f"  [discover_peb_offset] Peb @ EPROCESS+0x{peb_off:X}")
+            else:
+                sec_off = discover_section_base(
+                    self._paging, self._kernel_cr3, self._offsets, procs
+                )
+                if sec_off is not None:
+                    self._offsets['SectionBaseAddress'] = sec_off
+                    discovered = True
+        if discovered:
+            procs = list_processes(self._paging, self._kernel_cr3, self._offsets)
 
         self._processes = procs
         return procs

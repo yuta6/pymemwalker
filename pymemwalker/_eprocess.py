@@ -107,11 +107,7 @@ def _read_eprocess_via_va(
         return None
     cr3 = struct.unpack('<Q', cr3_data)[0]
 
-    base = 0
-    if 'SectionBaseAddress' in offsets:
-        base_data = paging.read_va(kernel_cr3, eproc_va + offsets['SectionBaseAddress'], 8)
-        if len(base_data) == 8:
-            base = struct.unpack('<Q', base_data)[0]
+    base = _resolve_image_base(paging, kernel_cr3, eproc_va, cr3, offsets)
 
     return ProcessInfo(pid=pid, name=name, cr3=cr3, base=base, eproc_va=eproc_va)
 
@@ -132,13 +128,212 @@ def _read_eprocess_via_pa(
     name = name_data.rstrip(b'\x00').decode(errors='replace')
     cr3 = struct.unpack('<Q', paging.read_pa(eproc_pa + offsets['DirectoryTableBase'], 8))[0]
 
-    base = 0
-    if 'SectionBaseAddress' in offsets:
-        base_data = paging.read_pa(eproc_pa + offsets['SectionBaseAddress'], 8)
-        if len(base_data) == 8:
-            base = struct.unpack('<Q', base_data)[0]
+    # PA-read variant of the base resolver. The PEB lookup still needs VA
+    # translation for the user-mode PEB itself, so we pass eproc_va too.
+    base = _resolve_image_base_pa(paging, eproc_pa, eproc_va, cr3, offsets)
 
     return ProcessInfo(pid=pid, name=name, cr3=cr3, base=base, eproc_va=eproc_va)
+
+
+def _resolve_image_base(
+    paging: Paging,
+    kernel_cr3: int,
+    eproc_va: int,
+    proc_cr3: int,
+    offsets: dict,
+) -> int:
+    """Read the process's main-EXE image base.
+
+    Strategy (in order):
+
+      1. ``Peb`` offset is known — read the PEB VA from EPROCESS via the
+         kernel CR3, then read ``PEB.ImageBaseAddress`` (+0x10) via the
+         **process's own CR3**. This is the modern Windows path; the
+         ``SectionBaseAddress`` field was removed in recent builds.
+
+      2. ``SectionBaseAddress`` offset is known — read the user-mode VA
+         directly from EPROCESS via the kernel CR3. Used as a fallback
+         for older Windows builds where that field still exists.
+
+      3. Neither offset discovered yet — returns 0.
+    """
+    if 'Peb' in offsets:
+        peb_ptr = paging.read_va(kernel_cr3, eproc_va + offsets['Peb'], 8)
+        if len(peb_ptr) == 8:
+            peb_va = struct.unpack('<Q', peb_ptr)[0]
+            if peb_va and proc_cr3:
+                base_bytes = paging.read_va(proc_cr3, peb_va + 0x10, 8)
+                if len(base_bytes) == 8:
+                    return struct.unpack('<Q', base_bytes)[0]
+    if 'SectionBaseAddress' in offsets:
+        base_bytes = paging.read_va(kernel_cr3, eproc_va + offsets['SectionBaseAddress'], 8)
+        if len(base_bytes) == 8:
+            return struct.unpack('<Q', base_bytes)[0]
+    return 0
+
+
+def _resolve_image_base_pa(
+    paging: Paging,
+    eproc_pa: int,
+    eproc_va: int,
+    proc_cr3: int,
+    offsets: dict,
+) -> int:
+    """Same as ``_resolve_image_base`` but reads the PEB pointer from PA
+    (used for the very first System read where we know only the PA)."""
+    if 'Peb' in offsets:
+        peb_ptr = paging.read_pa(eproc_pa + offsets['Peb'], 8)
+        if len(peb_ptr) == 8:
+            peb_va = struct.unpack('<Q', peb_ptr)[0]
+            if peb_va and proc_cr3:
+                base_bytes = paging.read_va(proc_cr3, peb_va + 0x10, 8)
+                if len(base_bytes) == 8:
+                    return struct.unpack('<Q', base_bytes)[0]
+    if 'SectionBaseAddress' in offsets:
+        base_bytes = paging.read_pa(eproc_pa + offsets['SectionBaseAddress'], 8)
+        if len(base_bytes) == 8:
+            return struct.unpack('<Q', base_bytes)[0]
+    return 0
+
+
+# Processes that have NO user-mode PEB. They live in kernel space only
+# (System, the Secure System enclave, Registry, MemCompression, etc.) —
+# we must not pick them as the "user" reference when looking for the
+# Peb offset, or every offset will look like 0.
+_NO_PEB_NAMES = {
+    "system",
+    "secure system",
+    "registry",
+    "memcompression",
+    "minimal",
+}
+
+# Preferred references for the Peb-offset search, in priority order.
+# These are all early-boot session-0 processes — stable layout, never
+# paged out, deterministic by name. We use this priority so that the
+# search converges in one iteration on a healthy system, and so the
+# behaviour is reproducible across runs (MemProcFS uses smss.exe by
+# the same rationale).
+_PEB_PRIORITY_NAMES = (
+    "smss.exe",
+    "csrss.exe",
+    "wininit.exe",
+    "services.exe",
+    "lsass.exe",
+)
+
+
+def discover_peb_offset(
+    paging: Paging,
+    kernel_cr3: int,
+    offsets: dict,
+    processes: list[ProcessInfo],
+) -> Optional[int]:
+    """Infer the EPROCESS.Peb offset using the SYSTEM-vs-user contrast.
+
+    Strategy (close to MemProcFS's ``VmmWinProcess_OffsetLocator64``):
+
+      ① System has ``Peb == 0`` (kernel-only, no user-mode address space).
+      ② A genuinely user-mode process (smss.exe, etc.) has a valid
+         user-VA there.
+      ③ Reading ``PEB.ImageBaseAddress`` (PEB+0x10) through that process's
+         own CR3 yields another valid user VA.
+      ④ That VA's first two bytes are ``"MZ"`` (the main EXE's PE header).
+
+    The kernel-only processes listed in ``_NO_PEB_NAMES`` are filtered
+    out so they aren't used as the "user" reference (they also have
+    Peb=0 and would defeat check ②).
+    """
+    system = next((p for p in processes if p.pid == 4), None)
+    if system is None:
+        return None
+
+    real_user_procs = [
+        p for p in processes
+        if p.pid not in (0, 4)
+        and p.cr3
+        and p.name.lower() not in _NO_PEB_NAMES
+    ]
+    if len(real_user_procs) < 2:
+        return None
+
+    # Sort references by priority — smss.exe first, then other early-boot
+    # session-0 processes, then everything else (chain order).
+    def _priority(p: ProcessInfo) -> int:
+        try:
+            return _PEB_PRIORITY_NAMES.index(p.name.lower())
+        except ValueError:
+            return len(_PEB_PRIORITY_NAMES)
+    real_user_procs.sort(key=_priority)
+
+    system_data = paging.read_va(kernel_cr3, system.eproc_va, 0x1000)
+    if len(system_data) < 0x1000:
+        return None
+
+    # Try the first few real user processes as the reference — paged-out
+    # PEBs occasionally break a single sample, so we round-robin.
+    for first in real_user_procs[:5]:
+        user_data = paging.read_va(kernel_cr3, first.eproc_va, 0x1000)
+        if len(user_data) < 0x1000:
+            continue
+
+        candidates: list[int] = []
+        for off in range(0, 0x1000 - 8, 8):
+            if struct.unpack_from('<Q', system_data, off)[0] != 0:
+                continue                          # ① System must be 0
+            peb_va = struct.unpack_from('<Q', user_data, off)[0]
+            if peb_va == 0 or peb_va > USER_VA_MAX or (peb_va & 0xFFF):
+                continue                          # ② user VA, page-aligned
+
+            ib_bytes = paging.read_va(first.cr3, peb_va + 0x10, 8)
+            if len(ib_bytes) != 8:
+                continue
+            image_base = struct.unpack('<Q', ib_bytes)[0]
+            if image_base == 0 or image_base > USER_VA_MAX or (image_base & 0xFFF):
+                continue
+
+            header = paging.read_va(first.cr3, image_base, 2)
+            if header != b'MZ':
+                continue                          # ④
+            candidates.append(off)
+
+        verify_procs = [p for p in real_user_procs if p is not first][:3]
+        for off in candidates:
+            if _verify_peb_offset(paging, kernel_cr3, verify_procs, off):
+                return off
+
+    return None
+
+
+def _verify_peb_offset(
+    paging: Paging,
+    kernel_cr3: int,
+    processes: list[ProcessInfo],
+    candidate_off: int,
+) -> bool:
+    """Majority-vote verification: at least len(processes)-1 must yield a
+    valid PEB → ImageBaseAddress → "MZ" chain. Tolerates one paged-out
+    PEB without rejecting an otherwise-good offset.
+    """
+    if not processes:
+        return False
+    successes = 0
+    for p in processes:
+        peb_data = paging.read_va(kernel_cr3, p.eproc_va + candidate_off, 8)
+        if len(peb_data) != 8:
+            continue
+        peb_va = struct.unpack('<Q', peb_data)[0]
+        if peb_va == 0 or peb_va > USER_VA_MAX or (peb_va & 0xFFF):
+            continue
+        ib_bytes = paging.read_va(p.cr3, peb_va + 0x10, 8)
+        if len(ib_bytes) != 8:
+            continue
+        image_base = struct.unpack('<Q', ib_bytes)[0]
+        if image_base == 0 or image_base > USER_VA_MAX or (image_base & 0xFFF):
+            continue
+        if paging.read_va(p.cr3, image_base, 2) == b'MZ':
+            successes += 1
+    return successes >= max(1, len(processes) - 1)
 
 
 def discover_section_base(
