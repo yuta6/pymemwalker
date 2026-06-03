@@ -4,6 +4,7 @@ Wires together the acquisition backend, the page-table walker, the kernel
 CR3 discovery, and the EPROCESS chain walker. All the expensive scans run
 once in ``__init__``; subsequent calls hit caches.
 """
+import struct
 from typing import Optional
 
 from ._acquisition import PhysicalMemoryAcquisition
@@ -15,6 +16,7 @@ from ._eprocess import (
     discover_peb_offset,
     discover_section_base,
 )
+from ._process import Process
 
 
 class Walker:
@@ -101,6 +103,20 @@ class Walker:
         self._processes = procs
         return procs
 
+    def process(self, name: str) -> Optional[Process]:
+        """Return a ``Process`` view for the process matching ``name``
+        (case-insensitive), or None if no such process exists.
+
+        The view binds this process's CR3 / base / pid / eproc_va and adds
+        typed-struct and pointer-chain reads — the ergonomic entry point
+        for actually reading a process's memory. ``cr3_by_name`` /
+        ``base_by_name`` remain for callers that just want the raw values.
+        """
+        for p in self.list_processes():
+            if p.name.lower() == name.lower():
+                return Process(self, p)
+        return None
+
     def cr3_by_name(self, name: str) -> Optional[int]:
         """Return DirectoryTableBase (CR3) for a process matching ``name``
         (case-insensitive). Returns None if no such process exists."""
@@ -143,6 +159,51 @@ class Walker:
         """Write ``data`` at physical address ``pa``. Returns ``True`` on
         success. Invalidates any cached page overlapping the range."""
         return self._paging.write_pa(pa, data)
+
+    def refresh_process(self, name: str) -> Optional[int]:
+        """Re-read just one cached process's DTB from its EPROCESS, live.
+
+        Cheap targeted refresh: instead of re-walking the whole
+        ActiveProcessLinks chain (``flush_processes``), this re-reads the
+        ``DirectoryTableBase`` of the already-known process at its cached
+        ``eproc_va``, bypassing the physical page cache so the value
+        reflects current memory. The cached entry is updated in place and
+        the (possibly new) CR3 is returned.
+
+        Returns ``None`` if the process is not in the cache, or if its
+        EPROCESS slot no longer holds a process of this name (exited /
+        slot reused) — in that case call ``flush_processes`` and re-resolve
+        by name.
+
+        The image base is NOT re-read (it is stable for a process's
+        lifetime); use ``flush_processes`` for a full re-discovery.
+        Normal Windows keeps a live process's CR3 fixed for its lifetime,
+        so this is only needed for backends/targets that rotate the DTB.
+        """
+        if self._processes is None:
+            self.list_processes()
+
+        dtb_off = self._offsets['DirectoryTableBase']
+        name_off = self._offsets['ImageFileName']
+        for p in self._processes:
+            if p.name.lower() != name.lower():
+                continue
+            # Force a fresh read of the EPROCESS page(s), not the cache.
+            self._paging.invalidate_va(self._kernel_cr3, p.eproc_va, 0x1000)
+            # Validate the slot still belongs to this process.
+            name_data = self._paging.read_va(
+                self._kernel_cr3, p.eproc_va + name_off, 15
+            )
+            if name_data.rstrip(b'\x00').decode(errors='replace').lower() != name.lower():
+                return None
+            cr3_data = self._paging.read_va(
+                self._kernel_cr3, p.eproc_va + dtb_off, 8
+            )
+            if len(cr3_data) != 8:
+                return None
+            p.cr3 = struct.unpack('<Q', cr3_data)[0]
+            return p.cr3
+        return None
 
     def flush_processes(self) -> None:
         """Forget the cached process list and TLB.

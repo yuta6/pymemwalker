@@ -186,6 +186,24 @@ class Paging:
             pos += take
         return True
 
+    def invalidate_va(self, cr3: int, va: int, size: int) -> None:
+        """Drop the cached physical pages backing ``[va, va+size)`` so the
+        next read re-fetches them from the backend.
+
+        Use on live backends to force a fresh read of a region that may
+        have changed since it was last cached — e.g. re-reading an
+        EPROCESS field whose value is volatile. The VA->PA translation
+        (TLB) is left intact: page-table mappings are stable even when the
+        page *contents* change. No-op if the page cache is empty.
+        """
+        end = va + size - 1
+        page_va = va & ~0xFFF
+        while page_va <= end:
+            pa = self.va_to_pa(cr3, page_va)
+            if pa is not None:
+                self._page_cache.pop(pa & ~0xFFF, None)
+            page_va += 0x1000
+
     def flush_translations(self) -> None:
         """Drop the TLB cache. Keeps the physical page cache."""
         self._tlb.clear()

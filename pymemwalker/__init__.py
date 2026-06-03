@@ -11,14 +11,17 @@ Design constraints:
 
 Public API:
   Walker                       — top-level class users instantiate.
+  Process                      — ergonomic per-process read/write view
+                                 (from Walker.process(name)).
   PhysicalMemoryAcquisition    — Protocol users implement for their backend.
   ProcessInfo                  — return type of Walker.list_processes().
 
-Internal modules (``_acquisition``, ``_paging``, ``_kernel``, ``_eprocess``)
-are implementation details and not part of the public API.
+Internal modules (``_acquisition``, ``_paging``, ``_kernel``, ``_eprocess``,
+``_process``) are implementation details and not part of the public API.
 """
 from .walker import Walker
 from ._acquisition import PhysicalMemoryAcquisition
 from ._eprocess import ProcessInfo
+from ._process import Process
 
-__all__ = ["Walker", "PhysicalMemoryAcquisition", "ProcessInfo"]
+__all__ = ["Walker", "Process", "PhysicalMemoryAcquisition", "ProcessInfo"]
