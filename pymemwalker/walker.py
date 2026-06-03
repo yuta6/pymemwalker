@@ -19,6 +19,21 @@ from ._eprocess import (
 from ._process import Process
 
 
+def _name_matches(stored: str, query: str) -> bool:
+    """Case-insensitive process-name match that tolerates EPROCESS
+    ``ImageFileName`` truncation.
+
+    ``ImageFileName`` is a 15-byte field (~14 usable chars + NUL), so a name
+    like ``"r5apex_dx12.exe"`` (15 chars) is stored truncated as
+    ``"r5apex_dx12.ex"``. A stored name at the truncation limit therefore
+    matches any longer query it is a prefix of.
+    """
+    s, q = stored.lower(), query.lower()
+    if s == q:
+        return True
+    return len(s) >= 14 and q.startswith(s)
+
+
 class Walker:
     """Memory-image analysis context.
 
@@ -113,7 +128,7 @@ class Walker:
         ``base_by_name`` remain for callers that just want the raw values.
         """
         for p in self.list_processes():
-            if p.name.lower() == name.lower():
+            if _name_matches(p.name, name):
                 return Process(self, p)
         return None
 
@@ -121,7 +136,7 @@ class Walker:
         """Return DirectoryTableBase (CR3) for a process matching ``name``
         (case-insensitive). Returns None if no such process exists."""
         for p in self.list_processes():
-            if p.name.lower() == name.lower():
+            if _name_matches(p.name, name):
                 return p.cr3
         return None
 
@@ -130,7 +145,7 @@ class Walker:
         (case-insensitive). Returns None if no such process or if the
         base could not be discovered."""
         for p in self.list_processes():
-            if p.name.lower() == name.lower():
+            if _name_matches(p.name, name):
                 return p.base if p.base else None
         return None
 
