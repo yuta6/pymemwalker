@@ -1,6 +1,6 @@
 [project]
 name = "pymemwalker"
-version = "0.2.1"
+version = "0.2.2"
 description = "Minimal x86-64 4-level page walk + EPROCESS chain walk in pure Python standard library"
 readme = "README.md"
 license = { file = "LICENSE" }

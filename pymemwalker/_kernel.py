@@ -19,11 +19,14 @@ Two-step process (mirrors MemProcFS's canonical pipeline):
 
 No physical-memory scanning is needed past Phase 1.
 """
+import logging
 import struct
 import time
 from typing import Optional, Tuple
 
 from ._acquisition import PhysicalMemoryAcquisition
+
+_log = logging.getLogger("pymemwalker")
 
 
 # Offset of DirectoryTableBase inside _EPROCESS. This is _KPROCESS.DirectoryTableBase,
@@ -108,7 +111,7 @@ def find_kernel_cr3(acq: PhysicalMemoryAcquisition) -> Tuple[int, int]:
             continue
 
         elapsed = time.perf_counter() - t0
-        print(f"  [find_kernel_cr3] Low Stub at PA=0x{pa:X}, "
+        _log.info(f"  [find_kernel_cr3] Low Stub at PA=0x{pa:X}, "
               f"kernel CR3 = 0x{cr3:X}, entry VA = 0x{entry:X} "
               f"({elapsed * 1000:.0f} ms)")
         return cr3, entry
@@ -201,7 +204,7 @@ def find_ntoskrnl_base(paging, kernel_cr3: int, kernel_entry_va: int) -> int:
                     candidates_examined.append((pa, name))
                     if name is not None and name in NTOSKRNL_NAMES:
                         elapsed = time.perf_counter() - t0
-                        print(f"  [find_ntoskrnl_base] {name.decode()} @ "
+                        _log.info(f"  [find_ntoskrnl_base] {name.decode()} @ "
                               f"VA=0x{pa:X} ({elapsed * 1000:.0f} ms, "
                               f"{len(candidates_examined)} candidate(s) examined)")
                         return pa
@@ -313,7 +316,7 @@ def discover_offsets(
     ntos_base = find_ntoskrnl_base(paging, kernel_cr3, kernel_entry_va)
     ps_init_va = resolve_pe_export(paging, kernel_cr3, ntos_base,
                                    "PsInitialSystemProcess")
-    print(f"  [discover_offsets] PsInitialSystemProcess @ VA=0x{ps_init_va:X}")
+    _log.info(f"  [discover_offsets] PsInitialSystemProcess @ VA=0x{ps_init_va:X}")
 
     eproc_va_bytes = paging.read_va(kernel_cr3, ps_init_va, 8)
     if len(eproc_va_bytes) != 8:
@@ -323,14 +326,14 @@ def discover_offsets(
         raise RuntimeError(
             f"PsInitialSystemProcess holds non-kernel VA 0x{system_eproc_va:X}"
         )
-    print(f"  [discover_offsets] System EPROCESS @ VA=0x{system_eproc_va:X}")
+    _log.info(f"  [discover_offsets] System EPROCESS @ VA=0x{system_eproc_va:X}")
 
     system_eproc_pa = paging.va_to_pa(kernel_cr3, system_eproc_va)
     if system_eproc_pa is None:
         raise RuntimeError(
             f"could not translate System EPROCESS VA 0x{system_eproc_va:X}"
         )
-    print(f"  [discover_offsets] System EPROCESS @ PA=0x{system_eproc_pa:X}")
+    _log.info(f"  [discover_offsets] System EPROCESS @ PA=0x{system_eproc_pa:X}")
 
     eproc_data = paging.read_pa(system_eproc_pa, EPROCESS_SIZE_MAX)
     if len(eproc_data) < EPROCESS_SIZE_MAX:
@@ -340,7 +343,7 @@ def discover_offsets(
     # be looking at a newer build that stores user/kernel DTBs differently.
     dtb_stored = struct.unpack_from('<Q', eproc_data, DTB_OFFSET_IN_EPROCESS)[0]
     if dtb_stored != kernel_cr3:
-        print(f"  [discover_offsets] WARN: EPROCESS+0x28 = 0x{dtb_stored:X} "
+        _log.warning(f"  [discover_offsets] EPROCESS+0x28 = 0x{dtb_stored:X} "
               f"!= kernel_cr3 = 0x{kernel_cr3:X} (encoded DTB?)")
 
     # We have known-good System EPROCESS bytes — derive field offsets.
@@ -357,7 +360,7 @@ def discover_offsets(
     offsets['DirectoryTableBase'] = DTB_OFFSET_IN_EPROCESS
 
     elapsed = time.perf_counter() - t0
-    print(f"  [discover_offsets] complete in {elapsed:.2f}s")
+    _log.info(f"  [discover_offsets] complete in {elapsed:.2f}s")
     return offsets
 
 

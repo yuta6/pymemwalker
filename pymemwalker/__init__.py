@@ -19,6 +19,14 @@ Public API:
 Internal modules (``_acquisition``, ``_paging``, ``_kernel``, ``_eprocess``,
 ``_process``) are implementation details and not part of the public API.
 """
+import logging as _logging
+
+# Library best practice: attach a NullHandler so importing pymemwalker never
+# emits log output unless the *application* configures logging. Discovery
+# diagnostics log at INFO and the encoded-DTB sanity check at WARNING; see them
+# with:  logging.getLogger("pymemwalker").setLevel(logging.INFO); logging.basicConfig()
+_logging.getLogger("pymemwalker").addHandler(_logging.NullHandler())
+
 from .walker import Walker
 from ._acquisition import PhysicalMemoryAcquisition
 from ._eprocess import ProcessInfo

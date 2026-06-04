@@ -4,6 +4,7 @@ Wires together the acquisition backend, the page-table walker, the kernel
 CR3 discovery, and the EPROCESS chain walker. All the expensive scans run
 once in ``__init__``; subsequent calls hit caches.
 """
+import logging
 import struct
 from typing import Optional
 
@@ -17,6 +18,8 @@ from ._eprocess import (
     discover_section_base,
 )
 from ._process import Process
+
+_log = logging.getLogger("pymemwalker")
 
 
 def _name_matches(stored: str, query: str) -> bool:
@@ -104,7 +107,7 @@ class Walker:
             if peb_off is not None:
                 self._offsets['Peb'] = peb_off
                 discovered = True
-                print(f"  [discover_peb_offset] Peb @ EPROCESS+0x{peb_off:X}")
+                _log.info(f"  [discover_peb_offset] Peb @ EPROCESS+0x{peb_off:X}")
             else:
                 sec_off = discover_section_base(
                     self._paging, self._kernel_cr3, self._offsets, procs
