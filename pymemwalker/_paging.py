@@ -90,10 +90,16 @@ class Paging:
       _page_cache  : pa_page        -> 4KB bytes  long-lived if the backend is a snapshot
     """
 
-    def __init__(self, acq: PhysicalMemoryAcquisition):
+    def __init__(self, acq: PhysicalMemoryAcquisition, cache_pages: bool = True):
         self._acq = acq
         self._tlb: dict[tuple[int, int], int] = {}
         self._page_cache: dict[int, bytes] = {}
+        # cache_pages=False: never retain physical page contents (every read
+        # hits the backend = always fresh). For LIVE backends where memory
+        # changes every frame, this removes the need to flush_pages() each
+        # frame. The TLB (translations) is unaffected. Snapshots should keep
+        # this True (a dump never changes; caching is a big win).
+        self._cache_pages = cache_pages
 
     def va_to_pa(self, cr3: int, va: int) -> Optional[int]:
         va_page = va & ~0xFFF
@@ -114,11 +120,11 @@ class Paging:
             page = pa & ~0xFFF
             in_page = pa & 0xFFF
             take = min(0x1000 - in_page, size)
-            if page in self._page_cache:
+            if self._cache_pages and page in self._page_cache:
                 chunk = self._page_cache[page]
             else:
                 chunk = self._acq.read_pa(page, 0x1000)
-                if len(chunk) == 0x1000:
+                if self._cache_pages and len(chunk) == 0x1000:
                     self._page_cache[page] = chunk
             if len(chunk) >= in_page + take:
                 out.extend(chunk[in_page:in_page + take])

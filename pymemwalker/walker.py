@@ -45,7 +45,11 @@ class Walker:
     after that runs against cached state.
     """
 
-    def __init__(self, acq: PhysicalMemoryAcquisition):
+    def __init__(self, acq: PhysicalMemoryAcquisition, cache_pages: bool = True):
+        # cache_pages=False is for LIVE backends (memory changes every frame):
+        # physical page contents are never retained, so reads are always fresh
+        # and there is no need to flush_pages() each frame. The TLB still
+        # caches translations. Leave True for snapshots (a dump never changes).
         # Structural check: missing methods / typos surface here.
         if not isinstance(acq, PhysicalMemoryAcquisition):
             raise TypeError(
@@ -57,7 +61,7 @@ class Walker:
         self._validate_acquisition(acq)
 
         self._acq = acq
-        self._paging = Paging(acq)
+        self._paging = Paging(acq, cache_pages=cache_pages)
 
         # One-time discovery. Results are immutable for the program's lifetime.
         # Low Stub yields both the kernel CR3 and a kernel-VA inside ntoskrnl;
