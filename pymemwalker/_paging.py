@@ -210,6 +210,23 @@ class Paging:
                 self._page_cache.pop(pa & ~0xFFF, None)
             page_va += 0x1000
 
+    def invalidate_translation(self, cr3: int, va: int, size: int) -> None:
+        """Drop the cached VA->PA translations for ``[va, va+size)`` so the
+        next read re-walks the page tables.
+
+        The targeted form of ``flush_translations`` — like the CPU's
+        ``INVLPG`` versus a full TLB flush. Use when a region's *mapping*
+        may have changed (page remapped / freed / paged in to a different
+        frame) and a stale translation is now returning the wrong physical
+        page. ``invalidate_va`` drops page *contents*; this drops the
+        *translation*. No-op for pages not currently cached.
+        """
+        end = va + size - 1
+        page = va & ~0xFFF
+        while page <= end:
+            self._tlb.pop((cr3, page), None)
+            page += 0x1000
+
     def flush_translations(self) -> None:
         """Drop the TLB cache. Keeps the physical page cache."""
         self._tlb.clear()

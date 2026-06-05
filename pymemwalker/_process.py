@@ -131,6 +131,19 @@ class Process:
         """
         return self._walker.refresh_process(self._info.name) is not None
 
+    def invalidate_translation(self, va: int, size: int) -> None:
+        """Tell the walker its cached VA->PA translation for ``[va, va+size)``
+        is stale, so the next read re-walks the page tables.
+
+        Bound counterpart of ``Walker.invalidate_translation`` (the
+        ``INVLPG`` to ``flush_translations``'s full flush). The consumer is
+        the only layer that can *detect* a stale translation — it has the
+        semantics to see a read came back garbage — so it signals the cache
+        owner here. Use when a single entity's read returns garbage to
+        re-walk just that region without flushing every translation.
+        """
+        self._walker.invalidate_translation(self._info.cr3, va, size)
+
     def __repr__(self) -> str:
         return (f"<Process {self._info.name!r} pid={self._info.pid} "
                 f"cr3=0x{self._info.cr3:X} base=0x{self._info.base:X}>")

@@ -254,6 +254,14 @@ class Walker:
         """
         self._paging.flush_pages()
 
+    def invalidate_translation(self, cr3: int, va: int, size: int) -> None:
+        """Drop cached VA->PA *translations* for ``[va, va+size)`` so the
+        next read re-walks the page tables. Targeted counterpart of
+        ``flush_translations`` (the ``INVLPG`` to its full flush) — use when
+        a stale translation is returning the wrong physical page for a
+        remapped/freed region, without paying a full re-walk of everything."""
+        self._paging.invalidate_translation(cr3, va, size)
+
     @staticmethod
     def _validate_acquisition(acq: PhysicalMemoryAcquisition) -> None:
         """Light behavioral sanity check on the backend.
