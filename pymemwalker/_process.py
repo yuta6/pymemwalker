@@ -101,6 +101,17 @@ class Process:
                 return 0
         return addr
 
+    # -- scatter reads -------------------------------------------------- #
+    def read_many(self, requests: list) -> list:
+        """Read multiple ``(va, size)`` regions in one batch.
+
+        Scatter-read counterpart of ``read()``: translates and
+        deduplicates physical pages internally, then issues a single
+        batched read to the backend.  Returns a list of ``bytes`` in
+        the same order as ``requests``.
+        """
+        return self._walker._paging.read_va_scatter(self._info.cr3, requests)
+
     # -- writes (live backends only) ------------------------------------ #
     def write(self, va: int, data: bytes) -> bool:
         """Write raw ``data`` at ``va``. Returns ``True`` on success.

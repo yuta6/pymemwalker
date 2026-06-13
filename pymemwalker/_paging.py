@@ -154,6 +154,57 @@ class Paging:
             size -= take
         return bytes(out)
 
+    def read_va_scatter(self, cr3: int, requests: list) -> list:
+        """Read multiple ``(va, size)`` regions in one batch.
+
+        Translates all VAs to PAs, deduplicates physical pages, reads
+        them via a single ``read_pa_scatter`` call, then assembles the
+        requested byte ranges. Cross-page requests are handled correctly.
+
+        Returns a list of ``bytes`` in the same order as ``requests``.
+        Invalid/paged-out regions are zero-filled, matching ``read_va``.
+        """
+        # Phase 1: translate all VA pages and collect unique PA pages.
+        # Each request may span multiple pages; track (req_idx, offset_in_result, pa, in_page, take).
+        segments = []
+        unique_pages = {}
+        for req_idx, (va, size) in enumerate(requests):
+            result_off = 0
+            rem = size
+            cur_va = va
+            while rem > 0:
+                page_va = cur_va & ~0xFFF
+                in_page = cur_va & 0xFFF
+                take = min(0x1000 - in_page, rem)
+                pa_page = self.va_to_pa(cr3, page_va)
+                segments.append((req_idx, result_off, pa_page, in_page, take))
+                if pa_page is not None and pa_page not in unique_pages:
+                    unique_pages[pa_page] = None
+                cur_va += take
+                result_off += take
+                rem -= take
+
+        # Phase 2: batch-read all unique physical pages.
+        if unique_pages:
+            page_list = list(unique_pages.keys())
+            page_data = self._acq.read_pa_scatter(
+                [(pa, 0x1000) for pa in page_list]
+            )
+            for pa, data in zip(page_list, page_data):
+                unique_pages[pa] = data
+
+        # Phase 3: assemble results from cached page data.
+        results = [bytearray(size) for _, (_, size) in enumerate(requests)]
+        for req_idx, result_off, pa_page, in_page, take in segments:
+            if pa_page is None:
+                pass  # already zero-filled
+            else:
+                page = unique_pages[pa_page]
+                if page and len(page) >= in_page + take:
+                    results[req_idx][result_off:result_off + take] = page[in_page:in_page + take]
+
+        return [bytes(r) for r in results]
+
     def write_pa(self, pa: int, data: bytes) -> bool:
         """Write ``data`` to physical memory. Invalidates any cached
         page that overlaps the written range. Returns the backend's

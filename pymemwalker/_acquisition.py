@@ -75,6 +75,20 @@ class PhysicalMemoryAcquisition(Protocol):
         """
         ...
 
+    def read_pa_scatter(self, requests: list) -> list:
+        """Read multiple ``(pa, size)`` pairs in one batch.
+
+        Default implementation falls back to serial ``read_pa`` calls.
+        Backends with native batch support (DMA hardware, etc.) should
+        override this to issue a single batched transfer — the primary
+        optimisation target for scatter reads.
+
+        Returns a list of ``bytes`` in the same order as ``requests``.
+        Each entry follows the same contract as ``read_pa``: short or
+        empty bytes for invalid/out-of-range regions, never raises.
+        """
+        return [self.read_pa(pa, size) for pa, size in requests]
+
     @property
     def max_pa(self) -> int:
         """Upper bound (exclusive) of valid physical addresses.
