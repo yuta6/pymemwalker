@@ -50,12 +50,17 @@ class Walker:
         # physical page contents are never retained, so reads are always fresh
         # and there is no need to flush_pages() each frame. The TLB still
         # caches translations. Leave True for snapshots (a dump never changes).
-        # Structural check: missing methods / typos surface here.
-        if not isinstance(acq, PhysicalMemoryAcquisition):
-            raise TypeError(
-                "acq must implement PhysicalMemoryAcquisition "
-                "(needs read_pa(pa, size) -> bytes and max_pa property)"
-            )
+        # Structural check: core methods (read_pa, write_pa, max_pa) must exist.
+        # read_pa_scatter is optional — backends without it get the Protocol's
+        # coalesce default automatically.
+        for attr in ('read_pa', 'write_pa', 'max_pa'):
+            if not hasattr(acq, attr):
+                raise TypeError(
+                    f"acq must implement PhysicalMemoryAcquisition "
+                    f"(missing {attr!r})"
+                )
+        if not hasattr(acq, 'read_pa_scatter'):
+            acq.read_pa_scatter = PhysicalMemoryAcquisition.read_pa_scatter.__get__(acq)
 
         # Behavioral sanity: catches common implementation bugs early.
         self._validate_acquisition(acq)
