@@ -185,11 +185,16 @@ class Paging:
                 rem -= take
 
         # Phase 2: batch-read all unique physical pages.
+        # Backend が read_pa_scatter を持てばそれを使う (native scatter / coalesce)。
+        # 持たなければ Paging 側で coalesce して read_pa にまとめる。
         if unique_pages:
             page_list = list(unique_pages.keys())
-            page_data = self._acq.read_pa_scatter(
-                [(pa, 0x1000) for pa in page_list]
-            )
+            if hasattr(self._acq, 'read_pa_scatter'):
+                page_data = self._acq.read_pa_scatter(
+                    [(pa, 0x1000) for pa in page_list]
+                )
+            else:
+                page_data = self._read_pa_scatter_fallback(page_list)
             for pa, data in zip(page_list, page_data):
                 unique_pages[pa] = data
 
@@ -277,6 +282,32 @@ class Paging:
         while page <= end:
             self._tlb.pop((cr3, page), None)
             page += 0x1000
+
+    def _read_pa_scatter_fallback(self, page_list: list) -> list:
+        """Backend が read_pa_scatter を持たない場合の coalesce fallback。
+        ソートして隣接ページを 1 回の read_pa にまとめる。"""
+        indexed = sorted(enumerate(page_list), key=lambda x: x[1])
+        chunks = []
+        ci, cpa = indexed[0]
+        group = [(ci, cpa)]
+        for i, pa in indexed[1:]:
+            if pa <= cpa + 0x1000:
+                cpa = pa
+                group.append((i, pa))
+            else:
+                chunks.append(group)
+                cpa = pa
+                group = [(i, pa)]
+        chunks.append(group)
+        results = [b""] * len(page_list)
+        for group in chunks:
+            start_pa = group[0][1]
+            end_pa = group[-1][1] + 0x1000
+            data = self._acq.read_pa(start_pa, end_pa - start_pa)
+            for orig_idx, pa in group:
+                off = pa - start_pa
+                results[orig_idx] = data[off:off + 0x1000]
+        return results
 
     def flush_translations(self) -> None:
         """Drop the TLB cache. Keeps the physical page cache."""

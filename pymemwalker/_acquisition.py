@@ -75,42 +75,6 @@ class PhysicalMemoryAcquisition(Protocol):
         """
         ...
 
-    def read_pa_scatter(self, requests: list) -> list:
-        """Read multiple ``(pa, size)`` pairs in one batch.
-
-        Default implementation sorts requests by address and coalesces
-        adjacent spans into larger ``read_pa`` calls (LeechCore-style
-        scatter-gather).  Backends with native batch support (DMA
-        hardware, etc.) should override this to issue a single batched
-        transfer.
-
-        Returns a list of ``bytes`` in the same order as ``requests``.
-        Each entry follows the same contract as ``read_pa``: short or
-        empty bytes for invalid/out-of-range regions, never raises.
-        """
-        if not requests:
-            return []
-        indexed = sorted(enumerate(requests), key=lambda x: x[1][0])
-        chunks = []
-        ci, (cpa, csz) = indexed[0]
-        group = [(ci, cpa, csz)]
-        for i, (pa, size) in indexed[1:]:
-            if pa <= cpa + csz:
-                csz = max(csz, pa + size - cpa)
-                group.append((i, pa, size))
-            else:
-                chunks.append((cpa, csz, group))
-                cpa, csz = pa, size
-                group = [(i, pa, size)]
-        chunks.append((cpa, csz, group))
-        results = [b""] * len(requests)
-        for chunk_pa, chunk_size, group in chunks:
-            data = self.read_pa(chunk_pa, chunk_size)
-            for orig_idx, pa, size in group:
-                off = pa - chunk_pa
-                results[orig_idx] = data[off:off + size]
-        return results
-
     @property
     def max_pa(self) -> int:
         """Upper bound (exclusive) of valid physical addresses.
