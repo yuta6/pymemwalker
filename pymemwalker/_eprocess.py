@@ -297,12 +297,38 @@ def discover_peb_offset(
                 continue                          # ④
             candidates.append(off)
 
-        verify_procs = [p for p in real_user_procs if p is not first][:3]
+        # Pick verifiers with DISTINCT names. Windows runs many copies of
+        # csrss.exe (one per session); taking the first three by priority
+        # would grab three csrss siblings, and if their PEBs are all paged
+        # out the correct offset gets rejected. Distinct names guarantee a
+        # diverse set (csrss / wininit / services / lsass ...), so at least
+        # one resident PEB is almost always present.
+        verify_procs = _distinct_by_name(
+            [p for p in real_user_procs if p is not first], 4
+        )
         for off in candidates:
             if _verify_peb_offset(paging, kernel_cr3, verify_procs, off):
                 return off
 
     return None
+
+
+def _distinct_by_name(
+    processes: list[ProcessInfo], limit: int
+) -> list[ProcessInfo]:
+    """First ``limit`` processes with pairwise-distinct (case-insensitive)
+    names, preserving input order."""
+    out: list[ProcessInfo] = []
+    seen: set[str] = set()
+    for p in processes:
+        key = p.name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(p)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def _verify_peb_offset(
@@ -311,29 +337,52 @@ def _verify_peb_offset(
     processes: list[ProcessInfo],
     candidate_off: int,
 ) -> bool:
-    """Majority-vote verification: at least len(processes)-1 must yield a
-    valid PEB → ImageBaseAddress → "MZ" chain. Tolerates one paged-out
-    PEB without rejecting an otherwise-good offset.
+    """Confirm a candidate Peb offset across several reference processes.
+
+    Each process falls into one of three buckets:
+
+      • confirm      — the full ``EPROCESS+off → PEB → ImageBaseAddress →
+                       "MZ"`` chain resolves.
+      • contradict   — the offset provably does NOT hold a PEB pointer: a
+                       non-zero value that is not a page-aligned user VA, or
+                       an ImageBase that IS a valid user VA but whose header
+                       is readable and not ``"MZ"``.
+      • inconclusive — the pointer looks right but the PEB page (or the image
+                       header page) is paged out, so the chain can't be
+                       completed. Also ``peb_va == 0`` (some processes
+                       legitimately have no PEB).
+
+    A paged-out PEB is *inconclusive*, not a failure. In a live capture,
+    non-session-0 copies of a process (e.g. per-session ``csrss.exe``)
+    frequently have their PEB paged out; counting those as failures used to
+    reject an otherwise-correct offset whenever the verifiers happened to be
+    several paged-out siblings of the same process.
+
+    Accept when at least one process confirms and none contradict.
     """
-    if not processes:
-        return False
-    successes = 0
+    confirms = 0
     for p in processes:
         peb_data = paging.read_va(kernel_cr3, p.eproc_va + candidate_off, 8)
         if len(peb_data) != 8:
-            continue
+            continue                                  # inconclusive
         peb_va = struct.unpack('<Q', peb_data)[0]
-        if peb_va == 0 or peb_va > USER_VA_MAX or (peb_va & 0xFFF):
-            continue
+        if peb_va == 0:
+            continue                                  # inconclusive (no PEB)
+        if peb_va > USER_VA_MAX or (peb_va & 0xFFF):
+            return False                              # contradiction: not a PEB ptr
         ib_bytes = paging.read_va(p.cr3, peb_va + 0x10, 8)
         if len(ib_bytes) != 8:
-            continue
+            continue                                  # inconclusive (PEB paged out)
         image_base = struct.unpack('<Q', ib_bytes)[0]
         if image_base == 0 or image_base > USER_VA_MAX or (image_base & 0xFFF):
-            continue
-        if paging.read_va(p.cr3, image_base, 2) == b'MZ':
-            successes += 1
-    return successes >= max(1, len(processes) - 1)
+            continue                                  # inconclusive
+        header = paging.read_va(p.cr3, image_base, 2)
+        if header == b'MZ':
+            confirms += 1
+        elif len(header) == 2:
+            return False                              # contradiction: not an image
+        # else: header page unreadable -> inconclusive
+    return confirms >= 1
 
 
 def discover_section_base(
