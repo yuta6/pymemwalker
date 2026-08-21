@@ -18,6 +18,12 @@ KERNEL_VA_MIN = 0xFFFF_0000_0000_0000
 # Canonical user-space virtual address maximum on x64 (48-bit canonical).
 USER_VA_MAX = 0x0000_7FFF_FFFF_FFFF
 
+# EPROCESS.Peb fuzzing window, mirroring MemProcFS VmmWinProcess_OffsetLocator64
+# (it scans [0x280, 0x580) for the Peb slot). References tried before giving up.
+PEB_SCAN_LO = 0x280
+PEB_SCAN_HI = 0x580
+PEB_MAX_REFS = 8
+
 
 @dataclass
 class ProcessInfo:
@@ -229,23 +235,30 @@ def discover_peb_offset(
     offsets: dict,
     processes: list[ProcessInfo],
 ) -> Optional[int]:
-    """Infer the EPROCESS.Peb offset using the SYSTEM-vs-user contrast.
+    """Infer the EPROCESS.Peb offset, mirroring MemProcFS's
+    ``VmmWinProcess_OffsetLocator64`` fuzzing strategy.
 
-    Strategy (close to MemProcFS's ``VmmWinProcess_OffsetLocator64``):
+    The Peb slot is 0 in the System process (kernel-only, no user PEB) but a
+    valid, page-aligned user VA in a user process; the page it points to is
+    present and does **not** start with ``"MZ"`` (an ``MZ`` page at that slot
+    is the image base — i.e. SectionBaseAddress — not the PEB).
 
-      ① System has ``Peb == 0`` (kernel-only, no user-mode address space).
-      ② A genuinely user-mode process (smss.exe, etc.) has a valid
-         user-VA there.
-      ③ Reading ``PEB.ImageBaseAddress`` (PEB+0x10) through that process's
-         own CR3 yields another valid user VA.
-      ④ That VA's first two bytes are ``"MZ"`` (the main EXE's PE header).
+    Robustness (why this replaced the earlier cross-verify scheme):
 
-    The kernel-only processes listed in ``_NO_PEB_NAMES`` are filtered
-    out so they aren't used as the "user" reference (they also have
-    Peb=0 and would defeat check ②).
+      * Presence is decided by ``va_to_pa()`` returning a physical address,
+        never by a zero-filled read. A paged-out page is *unknown* (skip),
+        never a *contradiction*. Backends that zero-pad holes (e.g. a DumpIt
+        live view) used to make a paged-out reference look like a "readable
+        non-MZ" contradiction and reject the real offset.
+      * One reference process settles it; if its PEB is paged out we fall back
+        to the next reference (up to ``PEB_MAX_REFS``). A single paged-out
+        reference can no longer poison the result.
     """
     system = next((p for p in processes if p.pid == 4), None)
     if system is None:
+        return None
+    system_data = paging.read_va(kernel_cr3, system.eproc_va, 0x1000)
+    if len(system_data) < 0x1000:
         return None
 
     real_user_procs = [
@@ -254,11 +267,8 @@ def discover_peb_offset(
         and p.cr3
         and p.name.lower() not in _NO_PEB_NAMES
     ]
-    if len(real_user_procs) < 2:
-        return None
 
-    # Sort references by priority — smss.exe first, then other early-boot
-    # session-0 processes, then everything else (chain order).
+    # smss.exe / csrss.exe / ... first: early-boot, stable layout, rarely paged.
     def _priority(p: ProcessInfo) -> int:
         try:
             return _PEB_PRIORITY_NAMES.index(p.name.lower())
@@ -266,50 +276,40 @@ def discover_peb_offset(
             return len(_PEB_PRIORITY_NAMES)
     real_user_procs.sort(key=_priority)
 
-    system_data = paging.read_va(kernel_cr3, system.eproc_va, 0x1000)
-    if len(system_data) < 0x1000:
-        return None
-
-    # Try the first few real user processes as the reference — paged-out
-    # PEBs occasionally break a single sample, so we round-robin.
-    for first in real_user_procs[:5]:
-        user_data = paging.read_va(kernel_cr3, first.eproc_va, 0x1000)
-        if len(user_data) < 0x1000:
+    # Distinct names so a paged-out reference is followed by a genuinely
+    # different process, not another paged-out sibling of the same image.
+    for ref in _distinct_by_name(real_user_procs, PEB_MAX_REFS):
+        ref_data = paging.read_va(kernel_cr3, ref.eproc_va, 0x1000)
+        if len(ref_data) < 0x1000:
             continue
+        off = _peb_offset_from_reference(paging, system_data, ref_data, ref.cr3)
+        if off is not None:
+            return off
+    return None
 
-        candidates: list[int] = []
-        for off in range(0, 0x1000 - 8, 8):
-            if struct.unpack_from('<Q', system_data, off)[0] != 0:
-                continue                          # ① System must be 0
-            peb_va = struct.unpack_from('<Q', user_data, off)[0]
-            if peb_va == 0 or peb_va > USER_VA_MAX or (peb_va & 0xFFF):
-                continue                          # ② user VA, page-aligned
 
-            ib_bytes = paging.read_va(first.cr3, peb_va + 0x10, 8)
-            if len(ib_bytes) != 8:
-                continue
-            image_base = struct.unpack('<Q', ib_bytes)[0]
-            if image_base == 0 or image_base > USER_VA_MAX or (image_base & 0xFFF):
-                continue
-
-            header = paging.read_va(first.cr3, image_base, 2)
-            if header != b'MZ':
-                continue                          # ④
-            candidates.append(off)
-
-        # Pick verifiers with DISTINCT names. Windows runs many copies of
-        # csrss.exe (one per session); taking the first three by priority
-        # would grab three csrss siblings, and if their PEBs are all paged
-        # out the correct offset gets rejected. Distinct names guarantee a
-        # diverse set (csrss / wininit / services / lsass ...), so at least
-        # one resident PEB is almost always present.
-        verify_procs = _distinct_by_name(
-            [p for p in real_user_procs if p is not first], 4
-        )
-        for off in candidates:
-            if _verify_peb_offset(paging, kernel_cr3, verify_procs, off):
-                return off
-
+def _peb_offset_from_reference(
+    paging: Paging,
+    system_data: bytes,
+    ref_data: bytes,
+    ref_cr3: int,
+) -> Optional[int]:
+    """Scan the Peb window for the first offset that behaves like a PEB for
+    this one reference process, or None if its PEB looks paged out (so the
+    caller moves on to another reference)."""
+    for off in range(PEB_SCAN_LO, PEB_SCAN_HI, 8):
+        if struct.unpack_from('<Q', system_data, off)[0] != 0:
+            continue                                   # (1) System.Peb must be 0
+        peb_va = struct.unpack_from('<Q', ref_data, off)[0]
+        if peb_va == 0 or peb_va > USER_VA_MAX or (peb_va & 0xFFF):
+            continue                                   # (2) user VA, page-aligned
+        pa = paging.va_to_pa(ref_cr3, peb_va)
+        if pa is None:
+            continue                                   # (3) paged out -> unknown, skip
+        head = paging.read_pa(pa, 2)
+        if len(head) < 2 or head == b'MZ':
+            continue                                   # (4) MZ page = image base, not PEB
+        return off
     return None
 
 
@@ -329,60 +329,6 @@ def _distinct_by_name(
         if len(out) >= limit:
             break
     return out
-
-
-def _verify_peb_offset(
-    paging: Paging,
-    kernel_cr3: int,
-    processes: list[ProcessInfo],
-    candidate_off: int,
-) -> bool:
-    """Confirm a candidate Peb offset across several reference processes.
-
-    Each process falls into one of three buckets:
-
-      • confirm      — the full ``EPROCESS+off → PEB → ImageBaseAddress →
-                       "MZ"`` chain resolves.
-      • contradict   — the offset provably does NOT hold a PEB pointer: a
-                       non-zero value that is not a page-aligned user VA, or
-                       an ImageBase that IS a valid user VA but whose header
-                       is readable and not ``"MZ"``.
-      • inconclusive — the pointer looks right but the PEB page (or the image
-                       header page) is paged out, so the chain can't be
-                       completed. Also ``peb_va == 0`` (some processes
-                       legitimately have no PEB).
-
-    A paged-out PEB is *inconclusive*, not a failure. In a live capture,
-    non-session-0 copies of a process (e.g. per-session ``csrss.exe``)
-    frequently have their PEB paged out; counting those as failures used to
-    reject an otherwise-correct offset whenever the verifiers happened to be
-    several paged-out siblings of the same process.
-
-    Accept when at least one process confirms and none contradict.
-    """
-    confirms = 0
-    for p in processes:
-        peb_data = paging.read_va(kernel_cr3, p.eproc_va + candidate_off, 8)
-        if len(peb_data) != 8:
-            continue                                  # inconclusive
-        peb_va = struct.unpack('<Q', peb_data)[0]
-        if peb_va == 0:
-            continue                                  # inconclusive (no PEB)
-        if peb_va > USER_VA_MAX or (peb_va & 0xFFF):
-            return False                              # contradiction: not a PEB ptr
-        ib_bytes = paging.read_va(p.cr3, peb_va + 0x10, 8)
-        if len(ib_bytes) != 8:
-            continue                                  # inconclusive (PEB paged out)
-        image_base = struct.unpack('<Q', ib_bytes)[0]
-        if image_base == 0 or image_base > USER_VA_MAX or (image_base & 0xFFF):
-            continue                                  # inconclusive
-        header = paging.read_va(p.cr3, image_base, 2)
-        if header == b'MZ':
-            confirms += 1
-        elif len(header) == 2:
-            return False                              # contradiction: not an image
-        # else: header page unreadable -> inconclusive
-    return confirms >= 1
 
 
 def discover_section_base(
