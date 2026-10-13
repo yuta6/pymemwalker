@@ -43,7 +43,8 @@ def list_processes(
     """Walk the circular ActiveProcessLinks chain to enumerate all processes.
 
     Starts at the System process (whose PA is known from ``discover_offsets``)
-    and follows Flink pointers until coming back to System.
+    and follows Flink pointers until coming back to System. The standalone
+    list head inside ntoskrnl is traversed but is never decoded as EPROCESS.
 
     If ``offsets`` contains ``SectionBaseAddress``, each process's image base
     is populated; otherwise ``base=0`` for every entry.
@@ -51,17 +52,25 @@ def list_processes(
     apl_off = offsets['ActiveProcessLinks']
     system_eproc_pa = offsets['eprocess_pa']
 
-    # Read System's ActiveProcessLinks directly via PA (its VA isn't known yet).
+    # Read System's ActiveProcessLinks through its known physical address.
     system_apl_data = paging.read_pa(system_eproc_pa + apl_off, 16)
+    if len(system_apl_data) != 16:
+        return []
     system_flink, _ = struct.unpack('<QQ', system_apl_data)
 
-    # Recover System's own ActiveProcessLinks VA: the next process's Blink
-    # (offset +8 within its ActiveProcessLinks) points back to it.
-    next_blink_data = paging.read_va(kernel_cr3, system_flink + 8, 8)
-    if len(next_blink_data) != 8:
-        return []
-    system_apl_va = struct.unpack('<Q', next_blink_data)[0]
-    system_eproc_va = system_apl_va - apl_off
+    system_eproc_va = offsets.get('eprocess_va')
+    if system_eproc_va is None:
+        # Compatibility with callers supplying only the physical address.
+        if system_flink < KERNEL_VA_MIN:
+            return []
+        next_blink_data = paging.read_va(kernel_cr3, system_flink + 8, 8)
+        if len(next_blink_data) != 8:
+            return []
+        system_apl_va = struct.unpack('<Q', next_blink_data)[0]
+        if system_apl_va < KERNEL_VA_MIN:
+            return []
+        system_eproc_va = system_apl_va - apl_off
+    system_apl_va = system_eproc_va + apl_off
 
     results: list[ProcessInfo] = []
 
@@ -69,28 +78,49 @@ def list_processes(
     system_info = _read_eprocess_via_va(paging, kernel_cr3, system_eproc_va, offsets)
     if system_info is None:
         system_info = _read_eprocess_via_pa(paging, system_eproc_pa, offsets, system_eproc_va)
+    if system_info is None:
+        return []
     results.append(system_info)
 
-    # Walk Flinks until we cycle back.
-    current_eproc_va = system_flink - apl_off
-    visited: set[int] = {system_eproc_va}
+    # EPROCESS lives in pool memory; a LIST_ENTRY in the kernel image is a
+    # list head, including when System is not the first entry in the list.
+    ntos_base = offsets.get('ntoskrnl_base', 0)
+    ntos_end = ntos_base + offsets.get('ntoskrnl_size', 0)
+    current_apl_va = system_flink
+    visited: set[int] = {system_apl_va}
 
-    while current_eproc_va not in visited:
-        visited.add(current_eproc_va)
-        info = _read_eprocess_via_va(paging, kernel_cr3, current_eproc_va, offsets)
-        if info is None:
+    while current_apl_va >= KERNEL_VA_MIN and current_apl_va not in visited:
+        visited.add(current_apl_va)
+        link_data = paging.read_va(kernel_cr3, current_apl_va, 16)
+        if len(link_data) != 16:
             break
-        results.append(info)
-
-        flink_data = paging.read_va(kernel_cr3, current_eproc_va + apl_off, 8)
-        if len(flink_data) != 8:
+        flink, blink = struct.unpack('<QQ', link_data)
+        if flink < KERNEL_VA_MIN or blink < KERNEL_VA_MIN:
             break
-        next_apl_va = struct.unpack('<Q', flink_data)[0]
-        if next_apl_va < KERNEL_VA_MIN:
-            break                          # corrupt VA, chain broken
-        current_eproc_va = next_apl_va - apl_off
+        if not ntos_base <= current_apl_va < ntos_end:
+            info = _read_eprocess_via_va(
+                paging, kernel_cr3, current_apl_va - apl_off, offsets
+            )
+            if info is not None:
+                results.append(info)
+        current_apl_va = flink
 
     return results
+
+
+def _decode_eprocess_fields(
+    pid_data: bytes, name_data: bytes, cr3_data: bytes
+) -> Optional[tuple[int, str, int]]:
+    """Reject incomplete/zero-padded records before exposing ProcessInfo."""
+    if len(pid_data) != 8 or len(name_data) != 15 or len(cr3_data) != 8:
+        return None
+    pid = struct.unpack('<Q', pid_data)[0]
+    name = name_data.split(b'\x00', 1)[0].decode(errors='replace')
+    # Windows process IDs are DWORDs; a kernel pointer is not a PID. A zero
+    # CR3 is allowed for kernel-only processes, so it is not a validity test.
+    if pid > 0xFFFFFFFF or not name:
+        return None
+    return pid, name, struct.unpack('<Q', cr3_data)[0]
 
 
 def _read_eprocess_via_va(
@@ -101,17 +131,12 @@ def _read_eprocess_via_va(
 ) -> Optional[ProcessInfo]:
     """Build a ProcessInfo by reading EPROCESS fields through VA translation."""
     pid_data = paging.read_va(kernel_cr3, eproc_va + offsets['UniqueProcessId'], 8)
-    if len(pid_data) != 8:
-        return None
-    pid = struct.unpack('<Q', pid_data)[0]
-
     name_data = paging.read_va(kernel_cr3, eproc_va + offsets['ImageFileName'], 15)
-    name = name_data.rstrip(b'\x00').decode(errors='replace')
-
     cr3_data = paging.read_va(kernel_cr3, eproc_va + offsets['DirectoryTableBase'], 8)
-    if len(cr3_data) != 8:
+    fields = _decode_eprocess_fields(pid_data, name_data, cr3_data)
+    if fields is None:
         return None
-    cr3 = struct.unpack('<Q', cr3_data)[0]
+    pid, name, cr3 = fields
 
     base = _resolve_image_base(paging, kernel_cr3, eproc_va, cr3, offsets)
 
@@ -123,16 +148,19 @@ def _read_eprocess_via_pa(
     eproc_pa: int,
     offsets: dict,
     eproc_va: int,
-) -> ProcessInfo:
+) -> Optional[ProcessInfo]:
     """Build a ProcessInfo by reading EPROCESS fields directly from PA.
 
     Used for the System process on the very first read, before any VA
     translation against the chain has been established.
     """
-    pid = struct.unpack('<Q', paging.read_pa(eproc_pa + offsets['UniqueProcessId'], 8))[0]
+    pid_data = paging.read_pa(eproc_pa + offsets['UniqueProcessId'], 8)
     name_data = paging.read_pa(eproc_pa + offsets['ImageFileName'], 15)
-    name = name_data.rstrip(b'\x00').decode(errors='replace')
-    cr3 = struct.unpack('<Q', paging.read_pa(eproc_pa + offsets['DirectoryTableBase'], 8))[0]
+    cr3_data = paging.read_pa(eproc_pa + offsets['DirectoryTableBase'], 8)
+    fields = _decode_eprocess_fields(pid_data, name_data, cr3_data)
+    if fields is None:
+        return None
+    pid, name, cr3 = fields
 
     # PA-read variant of the base resolver. The PEB lookup still needs VA
     # translation for the user-mode PEB itself, so we pass eproc_va too.

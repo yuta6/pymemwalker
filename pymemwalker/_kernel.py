@@ -287,6 +287,20 @@ def resolve_pe_export(
 
 
 
+def _read_image_size(paging, kernel_cr3: int, image_base: int) -> int:
+    """Read PE SizeOfImage for identifying list heads inside ntoskrnl."""
+    dos = paging.read_va(kernel_cr3, image_base, 0x40)
+    if len(dos) != 0x40 or dos[:2] != b'MZ':
+        return 0
+    e_lfanew = struct.unpack_from('<I', dos, 0x3C)[0]
+    if not 0 < e_lfanew < 0x1000:
+        return 0
+    nt = paging.read_va(kernel_cr3, image_base + e_lfanew, 0x54)
+    if len(nt) != 0x54 or nt[:4] != b'PE\x00\x00':
+        return 0
+    return struct.unpack_from('<I', nt, 0x50)[0]
+
+
 def discover_offsets(
     paging,
     kernel_cr3: int,
@@ -306,6 +320,8 @@ def discover_offsets(
       ImageFileName       offset within EPROCESS
       UniqueProcessId     offset within EPROCESS
       ActiveProcessLinks  offset within EPROCESS
+      ntoskrnl_base       kernel image base VA (list-head exclusion)
+      ntoskrnl_size       PE SizeOfImage (0 if unavailable)
 
     ``SectionBaseAddress`` is intentionally not derived here — System
     has no main image, so we leave that to a later pass against a user
@@ -358,6 +374,8 @@ def discover_offsets(
     offsets['eprocess_pa'] = system_eproc_pa
     offsets['eprocess_va'] = system_eproc_va
     offsets['DirectoryTableBase'] = DTB_OFFSET_IN_EPROCESS
+    offsets['ntoskrnl_base'] = ntos_base
+    offsets['ntoskrnl_size'] = _read_image_size(paging, kernel_cr3, ntos_base)
 
     elapsed = time.perf_counter() - t0
     _log.info(f"  [discover_offsets] complete in {elapsed:.2f}s")

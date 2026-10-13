@@ -228,13 +228,14 @@ class Walker:
         return None
 
     def flush_processes(self) -> None:
-        """Forget the cached process list and TLB.
+        """Forget the cached process list, physical pages, and TLB.
 
         Call this when processes may have started or exited and the cached
         EPROCESS chain is stale. The kernel CR3 and derived offsets are
         NOT touched (they are immutable for the program's lifetime).
         """
         self._processes = None
+        self._paging.flush_pages()
         self._paging.flush_translations()
 
     def flush_translations(self) -> None:
