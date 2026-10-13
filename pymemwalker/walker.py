@@ -228,13 +228,25 @@ class Walker:
         return None
 
     def flush_processes(self) -> None:
-        """Forget the cached process list and TLB.
+        """Forget the cached process list, physical pages, and TLB.
 
         Call this when processes may have started or exited and the cached
         EPROCESS chain is stale. The kernel CR3 and derived offsets are
         NOT touched (they are immutable for the program's lifetime).
+
+        Changed in 0.3.5: with cache_pages=True, this invalidates ALL cached
+        physical pages, including arbitrary data read through read_pa/read_va,
+        not only EPROCESS data. Subsequent reads reacquire bytes from the
+        acquisition backend; live-memory values may therefore differ from
+        previously cached values. Static snapshots keep the same contents,
+        but also incur fresh backend reads after this call.
+
+        This does not write target memory or change the VA->PA algorithm.
+        With cache_pages=False there are no retained physical pages to
+        invalidate; the translation cache is still cleared as before.
         """
         self._processes = None
+        self._paging.flush_pages()
         self._paging.flush_translations()
 
     def flush_translations(self) -> None:
